@@ -88,7 +88,7 @@ def build_features(pairs, records):
     nb = [[t for t in w if t.isdigit()] for w in toks["addr"][1]]
     f["num_jacc"] = [_jaccard(x, y) for x, y in zip(na, nb)]
     f["num_conflict"] = [int(bool(x) and bool(y) and not set(x) & set(y)) for x, y in zip(na, nb)]
-    f["first_num_eq"] = [(x[0] == y[0]) if x and y else -1 for x, y in zip(na, nb)]
+    f["first_num_eq"] = [int(x[0] == y[0]) if x and y else -1 for x, y in zip(na, nb)]
     f["same_country"] = (a["country"].values == b["country"].values).astype(int)  # never one-hot: France is unseen
     f["is_s3"] = pairs["cand_id"].str.startswith("S3-").astype(int).values
     if "block_score" in pairs:
@@ -173,7 +173,7 @@ def write_matching_results(matches, path, col="matched_entity_ids"):
 
 if __name__ == "__main__":
     # self-check on a tiny synthetic set
-    assert macro_f05({"a": {"x", "y", "z"}}, {"a": {"x", "z"}}) - 0.714 < 1e-3
+    assert abs(macro_f05({"a": {"x", "y", "z"}}, {"a": {"x", "z"}}) - 0.714) < 1e-3
     assert macro_f05({"a": set()}, {"a": set()}) == 1.0
     assert macro_f05({"a": {"x"}}, {"a": set()}) == 0.0
     pp = pd.DataFrame({"s1_id": ["a", "b", "b"], "cand_id": ["x", "x", "y"]})

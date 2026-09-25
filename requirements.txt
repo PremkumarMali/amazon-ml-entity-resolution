@@ -1,2 +1,5 @@
-pandas
-numpy
+# Tested with Python 3.13. All packages are permissively licensed (BSD / Apache-2.0).
+pandas==3.0.2
+numpy==2.4.3
+scipy==1.17.0
+pyarrow==24.0.0

@@ -1,0 +1,49 @@
+# ---- Challenge data (never commit; repository is public) ----
+data/raw/**
+data/processed/**
+data/interim/**
+!data/README.md
+
+*.tsv
+*.csv
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.zip
+*.tar
+*.tar.gz
+*.gz
+*.7z
+
+# ---- Outputs ----
+output/*
+!output/.gitkeep
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ---- Environments ----
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# ---- Notebooks ----
+.ipynb_checkpoints/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+__MACOSX/
+.vscode/
+.idea/

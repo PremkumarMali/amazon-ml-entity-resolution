@@ -1,0 +1,46 @@
+# Amazon ML Entity Resolution
+
+Solution workspace for the **Amazon ML Challenge 2026 — Business Entity Resolution** problem.
+
+Given business records (name, address, country) from three independent sources, the system will
+determine which Source 2 and Source 3 records correspond to each Source 1 business. Source 1 is the
+deduplicated reference source; each Source 1 entity may match zero, one, or many records.
+Submissions are scored with macro-averaged F0.5.
+
+See [docs/problem_statement.md](docs/problem_statement.md) for the full official problem statement.
+
+## Project Pipeline
+
+```
+Data Preparation
+  → Candidate Generation / Blocking
+  → Feature Engineering & Matching
+  → Evaluation
+  → Final Predictions
+```
+
+## Repository Structure
+
+```
+data/               local challenge data (raw data is git-ignored)
+src/
+  preprocessing/    dataset preparation / normalization
+  blocking/         candidate generation / blocking
+  matching/         feature engineering / ML matching
+  evaluation/       validation / F0.5 / error analysis
+  pipeline/         end-to-end integration
+notebooks/          exploration
+tests/              tests
+output/             generated submission files (git-ignored)
+resources/utils/    official organizer utilities (validate_submission.py)
+docs/               problem statement and documentation template
+```
+
+## Data
+
+Raw challenge data is intentionally **not** stored in this repository.
+See [data/README.md](data/README.md) for how to set it up locally.
+
+## Status
+
+Project scaffolding only. No pipeline components are implemented yet.

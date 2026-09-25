@@ -2,6 +2,22 @@
 
 Code: `src/matching/matcher.py` (features, model, decision rule, metric), `src/matching/train.py` (train and validate), `src/matching/predict.py` (test inference to both output files).
 
+## Interfaces
+
+**From P2 (blocking):**
+- A DataFrame (parquet) with `s1_id`, `cand_id`, and optionally `block_score` (higher = more likely). One row per (S1, candidate), no duplicates.
+- The list of **every** Source 1 ID in the run, including S1 entities that got zero candidates (`<pairs>_s1.parquet`, column `entity_id`). Zero-candidate S1s still count in macro-F0.5, so dropping them inflates the score.
+
+**From P1 (cleaning):**
+- Records with `entity_id`, `business_name`, `business_address`, `country`, for S1 and all S2/S3 candidates. Name and address may be P1's cleaned text; `country` stays the raw label (France is unseen in train, and nothing one-hots it).
+
+**To P4 (evaluation and submission):**
+- `<pairs>_oof.parquet`: `s1_id`, `cand_id`, `prob` (out-of-fold, GroupKFold by S1), `label` (1 if in the ground truth).
+- `src.matching.matcher.macro_f05(pred, truth)`, where both arguments are `{s1_id: set(ids)}` and `truth` covers every S1 (empty set = singleton). **Import it, don't reimplement it**, so every number in the report comes from the same metric.
+- `output/matching_results.tsv` and `output/candidate_pairs.tsv` from `src.matching.predict`.
+
+**Retrain rule:** the features (rank, gap, cross-entity, `block_score`), the TF-IDF vocabulary and the threshold all depend on the candidate distribution and on the text. Whenever P2's blocking or P1's cleaning changes, re-run `src.matching.train` on the new pairs and use the new model and threshold. Never reuse `matcher.pkl` across pipeline versions.
+
 ## 2.1 EDA findings that shaped the matcher
 
 - Train has 2.2M S1 records and about 10.3M S2+S3 records. 5.6% of S1 are singletons; the mean is about 3.5 matches per S1, and the maximum is 11.

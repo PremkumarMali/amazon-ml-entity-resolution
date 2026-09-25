@@ -40,11 +40,27 @@ def _nonascii(s):
     return sum(ord(c) > 127 for c in s) / max(len(s), 1)
 
 
-def _tfidf_cos(left, right):
+def _text(v):
+    return " ".join(_norm(v))
+
+
+def fit_tfidf(records):
+    """Name/address char TF-IDF fitted ONCE on training texts; stored with the model so a pair gets the same
+    cosine in train.py and in every predict.py chunk."""
+    out = {}
+    for col, key in (("business_name", "name"), ("business_address", "addr")):
+        texts = pd.unique(records[col].fillna("")).tolist()
+        out[key] = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=2, dtype=np.float32).fit(
+            [_text(v) for v in texts])
+    return out
+
+
+def _tfidf_cos(left, right, vec=None):
     # each S1 text repeats once per candidate: vectorize unique texts once, then index
     codes, uniq = pd.factorize(pd.Series(left + right, dtype=object))
-    M = normalize(TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=2, dtype=np.float32)
-                  .fit_transform(uniq))
+    if vec is None:  # legacy: per-batch fit, so scores depend on the batch
+        vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=2, dtype=np.float32).fit(uniq)
+    M = normalize(vec.transform(uniq))
     L, R = M[codes[:len(left)]], M[codes[len(left):]]
     return np.asarray(L.multiply(R).sum(axis=1)).ravel()
 
@@ -53,7 +69,8 @@ def _pair(scorer, x, y, scale=100):
     return process.cpdist(x, y, scorer=scorer, workers=-1) / scale
 
 
-def build_features(pairs, records):
+def build_features(pairs, records, tfidf=None):
+    """tfidf: output of fit_tfidf(); None falls back to fitting on this batch (inconsistent across batches)."""
     rec = records.set_index("entity_id")
     a, b = rec.loc[pairs["s1_id"]], rec.loc[pairs["cand_id"]]
     f = pd.DataFrame(index=pairs.index)
@@ -70,7 +87,7 @@ def build_features(pairs, records):
         f[f"{key}_tset"] = _pair(fuzz.token_set_ratio, ta, tb)
         f[f"{key}_partial"] = _pair(fuzz.partial_ratio, ta, tb)
         f[f"{key}_jacc"] = [_jaccard(x, y) for x, y in zip(wa, wb)]
-        f[f"{key}_tfidf"] = _tfidf_cos(ta, tb)
+        f[f"{key}_tfidf"] = _tfidf_cos(ta, tb, tfidf and tfidf[key])
         f[f"{key}_lendiff"] = [abs(len(x) - len(y)) / max(len(x), len(y), 1) for x, y in zip(ta, tb)]
         f[f"{key}_missing"] = [int(not x or not y) for x, y in zip(ta, tb)]
         f[f"{key}_nonascii"] = [max(_nonascii(x), _nonascii(y)) for x, y in zip(ta, tb)]
@@ -156,7 +173,7 @@ def cross_validate(pairs, records, truth, n_splits=5):
     """GroupKFold by S1 entity -> out-of-fold probs, best threshold, macro-F0.5."""
     from sklearn.model_selection import GroupKFold
 
-    X, y = build_features(pairs, records), label_pairs(pairs, truth)
+    X, y = build_features(pairs, records, fit_tfidf(records)), label_pairs(pairs, truth)
     oof = np.zeros(len(pairs))
     for tr, va in GroupKFold(n_splits).split(X, y, pairs["s1_id"]):
         oof[va] = train(X.iloc[tr], y[tr]).predict_proba(X.iloc[va])[:, 1]
@@ -197,6 +214,9 @@ if __name__ == "__main__":
         pairs.append((s1, d))
     records = pd.DataFrame(rows, columns=["entity_id", "business_name", "business_address", "country"])
     pairs = pd.DataFrame(pairs, columns=["s1_id", "cand_id"])
+    tf = fit_tfidf(records)  # same pair, same cosine whatever batch it is scored in
+    assert np.allclose(build_features(pairs, records, tf)["name_tfidf"].iloc[:2],
+                       build_features(pairs.iloc[:2], records, tf)["name_tfidf"])
     oof, t, score = cross_validate(pairs, records, truth, n_splits=3)
     print(f"synthetic CV macro-F0.5={score:.3f} at threshold={t}")
     assert score > 0.9

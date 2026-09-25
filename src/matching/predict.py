@@ -35,7 +35,7 @@ print(f"loaded {time.time() - t0:.0f}s: {len(s1)} S1, {len(others)} S2+S3", flus
 # keep only compact columns across chunks: exclusivity needs every pair's prob before deciding
 parts, done = [], 0
 for pairs, records in iter_by_country(s1, others, chunk=a.chunk):
-    X = build_features(pairs, records)[m["features"]]
+    X = build_features(pairs, records, m.get("tfidf"))[m["features"]]  # old pickles: per-chunk fit
     parts.append(pairs[["s1_id", "cand_id"]].assign(prob=m["model"].predict_proba(X)[:, 1].astype(np.float32)))
     done += pairs["s1_id"].nunique()
     print(f"  {done}/{len(s1)} S1 scored, {time.time() - t0:.0f}s", flush=True)

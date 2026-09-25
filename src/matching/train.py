@@ -13,8 +13,8 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 from src.blocking.baseline_tokens import read
-from src.matching.matcher import (best_threshold, build_features, exclusive, label_pairs, macro_f05, to_matches,
-                                  train)
+from src.matching.matcher import (best_threshold, build_features, exclusive, fit_tfidf, label_pairs, macro_f05,
+                                  to_matches, train)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--pairs", nargs="+", default=["data/interim/train_pairs.parquet"])
@@ -35,7 +35,8 @@ gt = gt[gt.source1_entity_id.isin(s1.entity_id)]
 truth = {s: set(filter(None, m.split(","))) for s, m in zip(gt.source1_entity_id, gt.matched_entity_ids)}
 print(f"loaded {time.time() - t0:.0f}s: {len(pairs)} pairs, {len(truth)} S1")
 
-X, y = build_features(pairs, records), label_pairs(pairs, truth)
+tfidf = fit_tfidf(records)
+X, y = build_features(pairs, records, tfidf), label_pairs(pairs, truth)
 print(f"features {time.time() - t0:.0f}s: {X.shape}, positive rate {y.mean():.3f}")
 
 from sklearn.model_selection import GroupKFold
@@ -59,5 +60,5 @@ print(f"matched S1: F0.5 {macro_f05(pred, {s: v for s, v in truth.items() if v})
 pairs.assign(prob=oof, label=y).to_parquet(a.pairs[0].replace(".parquet", "_oof.parquet"))  # for P4 error analysis
 with open(a.model, "wb") as fh:
     pickle.dump({"model": train(X, y), "threshold": te,  # predict.py always applies exclusive()
-                 "features": list(X.columns)}, fh)
+                 "features": list(X.columns), "tfidf": tfidf}, fh)
 print(f"saved model + oof, total {time.time() - t0:.0f}s")

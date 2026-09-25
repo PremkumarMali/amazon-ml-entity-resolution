@@ -66,6 +66,26 @@ A per-entity rule (keep candidates within x% of the entity's best score, with a 
 
 **Common false negatives:** mostly outside the model's reach: native-script names with a changed address, or a missing address together with a typo in the name.
 
+## Cost of a smaller K (for P2)
+
+The organizers rank a smaller candidate set per S1 higher, so we measured what cutting K costs the matcher. Each S1 keeps its top-K candidates by `block_score` from the stand-in blocking, and the matcher is retrained and cross-validated for each K. Sample: 30k random S1 (`train_pairs`, the same pairs as `train_pairs_oof.parquet`), 5-fold GroupKFold, exclusivity applied.
+
+| K | Mean candidates per S1 | Blocking ceiling | Model macro-F0.5 |
+|---|---|---|---|
+| 3 | 3.00 | 0.8063 | 0.7806 |
+| 5 | 5.00 | 0.8633 | 0.8307 |
+| 10 | 10.00 | 0.8994 | 0.8607 |
+| 15 | 14.99 | 0.9161 | 0.8745 |
+| 20 | 19.99 | 0.9267 | 0.8836 |
+| 30 | 29.97 | 0.9370 | **0.8921** |
+
+**Recommended K: 30.** No smaller K comes within 0.002 of the best: K=20 already costs 0.0085, and K=10 costs 0.031. The model tracks the ceiling at a nearly constant gap (0.03–0.045), so almost all of the loss comes from true matches that the cut throws away.
+
+Notes:
+- The curve is still rising at K=30, because the stand-in `block_score` is a plain IDF token overlap that ranks many true matches at positions 21–30. Ground truth has a mean of 3.5 matches per S1 (max 11), so a sharper ranking should reach the same ceiling with a much smaller K. P2 should improve the candidate ranking first, then cut K.
+- Re-run this sweep on P2's `block_score` before choosing K: `python -m src.matching.train --pairs <P2 pairs>.parquet --topk K` (experiment only; it saves nothing).
+- Not tested: an adaptive per-S1 cut (drop candidates far below that S1's best `block_score`) could lower the mean candidate count without a fixed K.
+
 ## Reproduce
 
 ```

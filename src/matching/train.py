@@ -19,10 +19,14 @@ from src.matching.matcher import (best_threshold, build_features, exclusive, fit
 ap = argparse.ArgumentParser()
 ap.add_argument("--pairs", nargs="+", default=["data/interim/train_pairs.parquet"])
 ap.add_argument("--model", default="data/interim/matcher.pkl")
+ap.add_argument("--topk", type=int, help="experiment: keep each S1's top-K candidates by block_score, save nothing")
 a = ap.parse_args()
 t0 = time.time()
 
 pairs = pd.concat(map(pd.read_parquet, a.pairs)).drop_duplicates(["s1_id", "cand_id"]).reset_index(drop=True)
+if a.topk:  # simulates a smaller blocking K (tell P2 what it costs)
+    pairs = pairs.sort_values("block_score", ascending=False, kind="stable")
+    pairs = pairs[pairs.groupby("s1_id").cumcount() < a.topk].sort_index().reset_index(drop=True)
 ids = pd.concat(pd.read_parquet(p.replace(".parquet", "_s1.parquet")) for p in a.pairs).entity_id
 s1 = read("data/raw/train/train_source1.tsv")
 s1 = s1[s1.entity_id.isin(ids)]
@@ -33,7 +37,7 @@ records = pd.concat([s1, others], ignore_index=True)
 gt = pd.read_csv("data/raw/train/train_ground_truth.tsv", sep="\t", dtype=str, keep_default_na=False)
 gt = gt[gt.source1_entity_id.isin(s1.entity_id)]
 truth = {s: set(filter(None, m.split(","))) for s, m in zip(gt.source1_entity_id, gt.matched_entity_ids)}
-print(f"loaded {time.time() - t0:.0f}s: {len(pairs)} pairs, {len(truth)} S1")
+print(f"loaded {time.time() - t0:.0f}s: {len(pairs)} pairs, {len(truth)} S1, {len(pairs) / len(truth):.2f} cands/S1")
 
 tfidf = fit_tfidf(records)
 X, y = build_features(pairs, records, tfidf), label_pairs(pairs, truth)
@@ -57,6 +61,8 @@ single = {s for s, v in truth.items() if not v}
 print(f"singletons: {np.mean([not pred[s] for s in single]):.3f} correctly empty ({len(single)})")
 print(f"matched S1: F0.5 {macro_f05(pred, {s: v for s, v in truth.items() if v}):.4f}")
 
+if a.topk:
+    raise SystemExit
 pairs.assign(prob=oof, label=y).to_parquet(a.pairs[0].replace(".parquet", "_oof.parquet"))  # for P4 error analysis
 with open(a.model, "wb") as fh:
     pickle.dump({"model": train(X, y), "threshold": te,  # predict.py always applies exclusive()

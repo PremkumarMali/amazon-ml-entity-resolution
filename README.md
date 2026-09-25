@@ -41,6 +41,17 @@ docs/               problem statement and documentation template
 Raw challenge data is intentionally **not** stored in this repository.
 See [data/README.md](data/README.md) for how to set it up locally.
 
+## Validate a submission
+
+The official problem statement refers to `utils/validate_submission.py`; in this repo it lives under
+`resources/utils/`:
+
+```
+python resources/utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir data/raw/test
+```
+
 ## Status
 
-Project scaffolding only. No pipeline components are implemented yet.
+`src/blocking/` and `src/matching/` contain the P3 matching code (see
+[docs/p3_matching.md](docs/p3_matching.md)). `src/preprocessing/`, `src/evaluation/` and
+`src/pipeline/` are empty placeholders for the planned layout.

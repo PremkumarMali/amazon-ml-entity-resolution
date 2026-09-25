@@ -69,8 +69,38 @@ def _pair(scorer, x, y, scale=100):
     return process.cpdist(x, y, scorer=scorer, workers=-1) / scale
 
 
-def build_features(pairs, records, tfidf=None):
-    """tfidf: output of fit_tfidf(); None falls back to fitting on this batch (inconsistent across batches)."""
+def top2(score, cand):
+    """-> DataFrame(c, s): each candidate's two best scores over the S1s that have it. The top-2 of a union is the
+    top-2 of the parts' top-2s, so per-chunk results can be concatenated and reduced again with top2()."""
+    d = pd.DataFrame({"c": np.asarray(cand), "s": np.asarray(score, dtype=float)})
+    d = d.sort_values(["c", "s"], ascending=[True, False])
+    return d[d.groupby("c").cumcount() < 2]
+
+
+def _other_gap(score, cand, top):
+    """score minus the best score any OTHER S1 gives the same candidate; 0 if no other S1 has it."""
+    g = top.groupby("c")["s"]
+    t1 = g.max().reindex(cand).to_numpy()
+    t2 = g.min().where(g.size() > 1).reindex(cand).to_numpy()
+    score = np.asarray(score, dtype=float)
+    return np.nan_to_num(score - np.where(score >= t1, t2, t1), nan=0.0)
+
+
+def xtop(pairs, records, tfidf):
+    """predict.py pass 1: top2() of the cross-entity scores for one chunk, far cheaper than build_features.
+    Reduce all chunks with top2() and pass as build_features(xtop=...) so competing S1s in other chunks count."""
+    name = records.set_index("entity_id")["business_name"].fillna("")
+    cache = {v: _text(v) for v in set(name)}
+    s = {"name_tfidf": _tfidf_cos([cache[v] for v in name.loc[pairs["s1_id"]]],
+                                  [cache[v] for v in name.loc[pairs["cand_id"]]], tfidf["name"])}
+    if "block_score" in pairs:
+        s["block_score"] = pairs["block_score"].to_numpy()
+    return {c: top2(v, pairs["cand_id"]) for c, v in s.items()}
+
+
+def build_features(pairs, records, tfidf=None, xtop=None):
+    """tfidf: output of fit_tfidf(); None falls back to fitting on this batch (inconsistent across batches).
+    xtop: {score: top2()} over ALL pairs (predict.py); None = this batch only, fine when it holds every pair."""
     rec = records.set_index("entity_id")
     a, b = rec.loc[pairs["s1_id"]], rec.loc[pairs["cand_id"]]
     f = pd.DataFrame(index=pairs.index)
@@ -118,6 +148,11 @@ def build_features(pairs, records, tfidf=None):
         f[f"{c}_gap"] = mx - f[c]
         f[f"{c}_rank"] = f.groupby(g)[c].rank(ascending=False, method="min")
     f["n_cands"] = f.groupby(g)["name_ratio"].transform("size")
+
+    # cross-entity: another S1 claims this candidate more strongly (a different business at the same address)
+    cand = pairs["cand_id"].to_numpy()
+    for c in ("name_tfidf",) + (("block_score",) if "block_score" in f else ()):
+        f[f"{c}_xgap"] = _other_gap(f[c], cand, xtop[c] if xtop else top2(f[c], cand))
     return f
 
 
@@ -195,6 +230,10 @@ if __name__ == "__main__":
     assert macro_f05({"a": {"x"}}, {"a": set()}) == 0.0
     pp = pd.DataFrame({"s1_id": ["a", "b", "b"], "cand_id": ["x", "x", "y"]})
     assert list(exclusive(pp, np.array([0.9, 0.7, 0.8]))) == [0.9, 0.0, 0.8]
+    sc, cd = np.array([0.9, 0.7, 0.8, 0.5, 0.5]), np.array(["x", "x", "y", "z", "z"])
+    assert np.allclose(_other_gap(sc, cd, top2(sc, cd)), [0.2, -0.2, 0, 0, 0])
+    part = pd.concat([top2(sc[:1], cd[:1]), top2(sc[1:], cd[1:])])  # chunked, as in predict.py
+    assert np.allclose(_other_gap(sc[1:], cd[1:], top2(part["s"], part["c"])), [-0.2, 0, 0, 0])
 
     rng = np.random.default_rng(0)
     names = ["abc technologies", "sharma traders", "blue ocean cafe", "delta motors", "zenith pharma",

@@ -21,18 +21,19 @@ Code: `src/matching/matcher.py` (features, model, decision rule, metric), `src/m
 
 **Unit:** one (S1, candidate) pair from blocking, labelled 1 if the candidate is in that S1's ground-truth list. Training uses only blocked candidates, so the training distribution matches inference.
 
-**Features (41):**
+**Features (43):**
 - Name and address, each: Levenshtein ratio, Jaro-Winkler, token-sort, token-set and partial ratio, token Jaccard, character 2–4-gram TF-IDF cosine (vectorizers fitted once on the training texts and stored in `matcher.pkl`, so a pair scores the same in training and in any test chunk), length difference, missing flag, non-Latin script share.
 - Core name, after removing legal forms and honorifics (including French SARL/SAS): token-sort ratio, Jaccard, and ratio and partial ratio of the joined name (catches domain-style names).
 - Address numbers (leading zeros stripped): Jaccard, "both have numbers but none shared" flag, first-number equality.
 - Context: same country, S2 vs S3, blocking score.
 - Rank within the S1's candidates: gap to the best score and rank position, for name TF-IDF, name token-sort, core token-sort, address TF-IDF and blocking score. This lets the model reject the weaker of two lookalike candidates.
+- Cross-entity, for name TF-IDF and blocking score: this S1's score minus the best score any *other* S1 gives the same candidate (0 if no other S1 has it). This targets the largest false-positive group, a different business at the same address. `predict.py` computes it in two passes (pass 1 keeps each candidate's top-2 scores over all test S1), so competing S1 entities in different 20k-S1 chunks still count, as they do in training. Checked on 119,658 dense-city pairs: two-pass values equal single-batch values exactly, while a naive per-chunk computation got 10% of rows wrong.
 
 **Model:** sklearn `HistGradientBoostingClassifier` (BSD-3; gradient-boosted trees, same family as LightGBM). Settings: 500 iterations, learning rate 0.05, 31 leaves, early stopping.
 
 **Decision rule:**
 1. **Exclusivity:** each S2/S3 record may go only to the S1 that scores it highest (it belongs to at most one S1 in the ground truth).
-2. **Threshold:** a pair counts as a match if its probability is at least 0.63. The threshold was chosen by maximising macro-F0.5 on out-of-fold predictions, after exclusivity.
+2. **Threshold:** a pair counts as a match if its probability is at least 0.64. The threshold was chosen by maximising macro-F0.5 on out-of-fold predictions, after exclusivity.
 
 A per-entity rule (keep candidates within x% of the entity's best score, with a separate "has any match" gate) was tested and gave no gain (+0.0001), so it was dropped.
 
@@ -42,13 +43,14 @@ A per-entity rule (keep candidates within x% of the entity's best score, with a 
 
 | | macro-F0.5 |
 |---|---|
-| Final model + exclusivity, threshold 0.63 | **0.8868** |
-| Without exclusivity, threshold 0.68 | 0.8858 |
+| Final model + exclusivity, threshold 0.64 | **0.8877** |
+| Without exclusivity, threshold 0.64 | 0.8872 |
 | Blocking ceiling (perfect matcher on these candidates) | 0.9276 |
 
-- Pair AUC is 0.9992, and 92.2% of singletons are correctly left empty.
+- Pair AUC is 0.9992, and 91.2% of singletons are correctly left empty.
 - TF-IDF fitted once instead of per batch: 0.8877 → 0.8868 (−0.0009, within run-to-run noise). CV cannot show the gain, because the whole CV sample is one batch; the fix removes a train/test skew in `predict.py`'s 20k-S1 chunks. Measured on the 30k sample, the old per-batch fit moved a pair's name TF-IDF cosine by a mean of 0.023 (p99 0.127, max 0.21) in a 500-S1 batch, and by 0.005 (p99 0.029) in a 20k-S1 batch. Small batches happen at test time: each country's last chunk, and France.
 - Exclusivity measured on the dense-city sample alone: 0.8808 → 0.8825.
+- Cross-entity features: dense-city sample (35,170 S1, the criterion for keeping the feature) 0.8804 → 0.8829 without exclusivity and 0.8823 → **0.8835** with it. Full sample with exclusivity: 0.8868 → 0.8877. Most of the gain overlaps with exclusivity, which already removes the weaker claim on a shared record.
 
 **Where the remaining score goes** (30k random sample, before exclusivity):
 

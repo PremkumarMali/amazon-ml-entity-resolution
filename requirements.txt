@@ -1,2 +1,6 @@
 pandas
 numpy
+rapidfuzz
+scikit-learn
+pyarrow
+matplotlib

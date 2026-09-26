@@ -41,6 +41,10 @@ docs/               problem statement and documentation template
 Raw challenge data is intentionally **not** stored in this repository.
 See [data/README.md](data/README.md) for how to set it up locally.
 
+## Setup
+
+Python 3.13 with `pip install -r requirements.txt`.
+
 ## Validate a submission
 
 The official problem statement refers to `utils/validate_submission.py`; in this repo it lives under
@@ -52,6 +56,11 @@ python resources/utils/validate_submission.py --matching output/matching_results
 
 ## Status
 
-`src/blocking/` and `src/matching/` contain the P3 matching code (see
-[docs/p3_matching.md](docs/p3_matching.md)). `src/preprocessing/`, `src/evaluation/` and
-`src/pipeline/` are empty placeholders for the planned layout.
+- Candidate generation / blocking (`src/blocking`): implemented. See
+  [docs/blocking_handoff.md](docs/blocking_handoff.md) for how to generate and consume
+  candidates, and [docs/blocking_data_analysis.md](docs/blocking_data_analysis.md) for the analysis
+  and measured results.
+- Matching (`src/matching`): implemented. See [docs/p3_matching.md](docs/p3_matching.md).
+- Evaluation and final pipeline: not implemented yet.
+
+Run the tests with `python -m unittest discover -s tests -t .`

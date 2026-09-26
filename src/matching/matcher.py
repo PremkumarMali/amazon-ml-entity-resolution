@@ -98,6 +98,22 @@ def xtop(pairs, records, tfidf):
     return {c: top2(v, pairs["cand_id"]) for c, v in s.items()}
 
 
+_NA = ["", "NULL", "null", "nan", "NaN", "None", "NA", "N/A", "n/a"]  # pandas' default NA strings found in the data
+_COLS = ["entity_id", "business_name", "business_address", "country"]
+
+
+def from_store(df):
+    """CandidateStore frame (with_records=True) -> (pairs, records) in this module's contract.
+    The store keeps "NULL"/"nan" as text; they become NaN (-> *_missing features), as with pd.read_csv defaults."""
+    df = df.rename(columns={"s1_entity_id": "s1_id", "candidate_entity_id": "cand_id", "score": "block_score"})
+    records = pd.concat([df[["s1_id", "s1_name", "s1_address", "s1_country"]].set_axis(_COLS, axis=1),
+                         df[["cand_id", "candidate_name", "candidate_address", "candidate_country"]].set_axis(_COLS, axis=1)])
+    records = records.drop_duplicates("entity_id").reset_index(drop=True)
+    records[_COLS[1:3]] = records[_COLS[1:3]].replace(_NA, np.nan)
+    keep = ["s1_id", "cand_id", "block_score", "rank", "name_score"] + (["label"] if "label" in df else [])
+    return df[keep].reset_index(drop=True), records
+
+
 def build_features(pairs, records, tfidf=None, xtop=None):
     """tfidf: output of fit_tfidf(); None falls back to fitting on this batch (inconsistent across batches).
     xtop: {score: top2()} over ALL pairs (predict.py); None = this batch only, fine when it holds every pair."""
@@ -138,12 +154,13 @@ def build_features(pairs, records, tfidf=None, xtop=None):
     f["first_num_eq"] = [int(x[0] == y[0]) if x and y else -1 for x, y in zip(na, nb)]
     f["same_country"] = (a["country"].values == b["country"].values).astype(int)  # never one-hot: France is unseen
     f["is_s3"] = pairs["cand_id"].str.startswith("S3-").astype(int).values
-    if "block_score" in pairs:
-        f["block_score"] = pairs["block_score"].values
+    for c in ("block_score", "rank", "name_score"):  # P2's blocker outputs (score renamed block_score)
+        if c in pairs:
+            f[c] = pairs[c].values
 
     # rank features: how this candidate compares to its S1's other candidates
     g = pairs["s1_id"].values
-    for c in ("name_tfidf", "name_tsort", "core_tsort", "addr_tfidf") + (("block_score",) if "block_score" in f else ()):
+    for c in ("name_tfidf", "name_tsort", "core_tsort", "addr_tfidf") + tuple(c for c in ("block_score", "name_score") if c in f):
         mx = f.groupby(g)[c].transform("max")
         f[f"{c}_gap"] = mx - f[c]
         f[f"{c}_rank"] = f.groupby(g)[c].rank(ascending=False, method="min")
@@ -198,7 +215,7 @@ def train(X, y, **kw):
 
 
 def best_threshold(pairs, prob, truth):
-    grid = np.round(np.arange(0.2, 0.96, 0.01), 2)
+    grid = np.round(np.arange(0.05, 0.99, 0.01), 2)
     scores = [macro_f05(to_matches(pairs, prob, t, truth), truth) for t in grid]
     i = int(np.argmax(scores))
     return float(grid[i]), scores[i]
@@ -230,6 +247,13 @@ if __name__ == "__main__":
     assert macro_f05({"a": {"x"}}, {"a": set()}) == 0.0
     pp = pd.DataFrame({"s1_id": ["a", "b", "b"], "cand_id": ["x", "x", "y"]})
     assert list(exclusive(pp, np.array([0.9, 0.7, 0.8]))) == [0.9, 0.0, 0.8]
+    fr = pd.DataFrame({"s1_entity_id": ["S1-a", "S1-a"], "candidate_entity_id": ["S2-x", "S3-y"], "score": [2.0, 1.0],
+                       "rank": [1, 2], "name_score": [1.0, 0.0], "s1_name": ["A"] * 2, "s1_address": ["NULL"] * 2,
+                       "s1_country": ["US"] * 2, "candidate_name": ["A", "nan"], "candidate_address": ["1 st", ""],
+                       "candidate_country": ["US"] * 2})
+    fp, fr = from_store(fr)
+    assert list(fp.columns) == ["s1_id", "cand_id", "block_score", "rank", "name_score"] and len(fr) == 3
+    assert fr.business_address.isna().tolist() == [True, False, True] and fr.business_name.isna().sum() == 1
     sc, cd = np.array([0.9, 0.7, 0.8, 0.5, 0.5]), np.array(["x", "x", "y", "z", "z"])
     assert np.allclose(_other_gap(sc, cd, top2(sc, cd)), [0.2, -0.2, 0, 0, 0])
     part = pd.concat([top2(sc[:1], cd[:1]), top2(sc[1:], cd[1:])])  # chunked, as in predict.py

@@ -1,22 +1,21 @@
 # P3: Matching Model (input for Documentation_template.md, sections 2.1, 4, 5)
 
-Code: `src/matching/matcher.py` (features, model, decision rule, metric), `src/matching/train.py` (train and validate), `src/matching/predict.py` (test inference to both output files).
+Code: `src/matching/matcher.py` (features, model, decision rule, metric), `src/matching/sample_candidates.py` (P2's blocker on the training sample), `src/matching/train.py` (train and validate), `src/matching/predict.py` (test inference to `matching_results.tsv`).
 
 ## Interfaces
 
-**From P2 (blocking):**
-- A DataFrame (parquet) with `s1_id`, `cand_id`, and optionally `block_score` (higher = more likely). One row per (S1, candidate), no duplicates.
-- The list of **every** Source 1 ID in the run, including S1 entities that got zero candidates (`<pairs>_s1.parquet`, column `entity_id`). Zero-candidate S1s still count in macro-F0.5, so dropping them inflates the score.
+**From P2 (blocking):** `src.blocking.handoff.CandidateStore` frames (`iter_frames(with_records=True)`, plus `with_labels=True` on train). `matcher.from_store()` turns a frame into the matcher's `pairs` (`s1_id`, `cand_id`, `block_score` = P2's `score`, `rank`, `name_score`) and `records` (`entity_id`, `business_name`, `business_address`, `country`). The store keeps `"NULL"`/`"nan"` as text. `from_store` maps them to missing values.
+- **Train:** `python -m src.matching.sample_candidates --top-k K` runs P2's engine with P2's default config, but only on the P3 training sample. It writes a `CandidateStore("train", out_dir="output/candidates_p3/kK")`. P2's blocker scores every S1 independently (output does not depend on shard size, blocking_data_analysis.md §10.6), so these are exactly the pairs the full `generate_candidates --split train` run gives the same S1. Pair recall on the sample at K=100 is 97.01%; P2 measured 97.05%.
+- **Test:** `python -m src.blocking.generate_candidates --split test --top-k K` → `output/candidates/test` and the official `output/candidate_pairs.tsv`. **K must equal the model's K.** `predict.py` refuses to run otherwise, because the rank, gap and cross-entity features depend on the length of the candidate list.
 
-**From P1 (cleaning):**
-- Records with `entity_id`, `business_name`, `business_address`, `country`, for S1 and all S2/S3 candidates. Name and address may be P1's cleaned text; `country` stays the raw label (France is unseen in train, and nothing one-hots it).
+**From P1 (cleaning):** records with cleaned `business_name` / `business_address` can replace the ones `from_store` builds. `country` stays the raw label (France is unseen in train, and nothing one-hots it).
 
 **To P4 (evaluation and submission):**
-- `<pairs>_oof.parquet`: `s1_id`, `cand_id`, `prob` (out-of-fold, GroupKFold by S1), `label` (1 if in the ground truth).
+- `output/candidates_p3/kK/oof.parquet`: `s1_id`, `cand_id`, `rank`, `label`, `prob` (out-of-fold, GroupKFold by S1).
 - `src.matching.matcher.macro_f05(pred, truth)`, where both arguments are `{s1_id: set(ids)}` and `truth` covers every S1 (empty set = singleton). **Import it, don't reimplement it**, so every number in the report comes from the same metric.
-- `output/matching_results.tsv` and `output/candidate_pairs.tsv` from `src.matching.predict`.
+- `output/matching_results.tsv` from `src.matching.predict`. Every match is in P2's candidate list, and each S2/S3 record is used at most once. `output/candidate_pairs.tsv` is P2's file.
 
-**Retrain rule:** the features (rank, gap, cross-entity, `block_score`), the TF-IDF vocabulary and the threshold all depend on the candidate distribution and on the text. Whenever P2's blocking or P1's cleaning changes, re-run `src.matching.train` on the new pairs and use the new model and threshold. Never reuse `matcher.pkl` across pipeline versions.
+**Retrain rule:** the features (rank, gap, cross-entity, P2 scores), the TF-IDF vocabulary and the threshold all depend on the candidate distribution (including K) and on the text. Whenever P2's blocking, K or P1's cleaning changes, re-run `sample_candidates` + `train` and use the new `matcher.pkl` (model, threshold, TF-IDF, K). Never reuse a `matcher.pkl` across pipeline versions.
 
 ## 2.1 EDA findings that shaped the matcher
 
@@ -35,83 +34,105 @@ Code: `src/matching/matcher.py` (features, model, decision rule, metric), `src/m
 
 ## 4. Matching model
 
-**Unit:** one (S1, candidate) pair from blocking, labelled 1 if the candidate is in that S1's ground-truth list. Training uses only blocked candidates, so the training distribution matches inference.
+**Unit:** one (S1, candidate) pair from P2's blocking, labelled 1 if the candidate is in that S1's ground-truth list. Training uses only blocked candidates, so the training distribution matches inference. True pairs the blocker missed (5.1% at K=20) cannot be predicted. They are left out of pair-level metrics but count as misses in macro-F0.5.
 
-**Features (43):**
-- Name and address, each: Levenshtein ratio, Jaro-Winkler, token-sort, token-set and partial ratio, token Jaccard, character 2–4-gram TF-IDF cosine (vectorizers fitted once on the training texts and stored in `matcher.pkl`, so a pair scores the same in training and in any test chunk), length difference, missing flag, non-Latin script share.
+**Features (47):**
+- Name and address, each: Levenshtein ratio, Jaro-Winkler, token-sort, token-set and partial ratio, token Jaccard, character 2–4-gram TF-IDF cosine (vectorizers fitted once on the training texts and stored in `matcher.pkl`, so a pair scores the same in training and in any test shard), length difference, missing flag, non-Latin script share.
 - Core name, after removing legal forms and honorifics (including French SARL/SAS): token-sort ratio, Jaccard, and ratio and partial ratio of the joined name (catches domain-style names).
 - Address numbers (leading zeros stripped): Jaccard, "both have numbers but none shared" flag, first-number equality.
-- Context: same country, S2 vs S3, blocking score.
-- Rank within the S1's candidates: gap to the best score and rank position, for name TF-IDF, name token-sort, core token-sort, address TF-IDF and blocking score. This lets the model reject the weaker of two lookalike candidates.
-- Cross-entity, for name TF-IDF and blocking score: this S1's score minus the best score any *other* S1 gives the same candidate (0 if no other S1 has it). This targets the largest false-positive group, a different business at the same address. `predict.py` computes it in two passes (pass 1 keeps each candidate's top-2 scores over all test S1), so competing S1 entities in different 20k-S1 chunks still count, as they do in training. Checked on 119,658 dense-city pairs: two-pass values equal single-batch values exactly, while a naive per-chunk computation got 10% of rows wrong.
+- P2's blocker outputs: `score` (as `block_score`), `rank`, `name_score`.
+- Context: same country, S2 vs S3.
+- Rank within the S1's candidates: gap to the best score and rank position, for name TF-IDF, name token-sort, core token-sort, address TF-IDF, block score and name score. This lets the model reject the weaker of two lookalike candidates.
+- Cross-entity, for name TF-IDF and block score: this S1's score minus the best score any *other* S1 gives the same candidate (0 if no other S1 has it). It targets a different business at the same address. `predict.py` computes it in two passes over P2's shards (pass 1 keeps each candidate's top-2 scores over all test S1), so a competing S1 in another shard still counts, as it does in training.
 
 **Model:** sklearn `HistGradientBoostingClassifier` (BSD-3; gradient-boosted trees, same family as LightGBM). Settings: 500 iterations, learning rate 0.05, 31 leaves, early stopping.
 
 **Decision rule:**
 1. **Exclusivity:** each S2/S3 record may go only to the S1 that scores it highest (it belongs to at most one S1 in the ground truth).
-2. **Threshold:** a pair counts as a match if its probability is at least 0.64. The threshold was chosen by maximising macro-F0.5 on out-of-fold predictions, after exclusivity.
+2. **Threshold:** a pair counts as a match if its probability is at least **0.65** (K=20). The threshold was chosen by maximising macro-F0.5 on out-of-fold predictions after exclusivity (grid 0.05–0.98). The optimum is flat: 0.60–0.75 are all within 0.0007 of the best.
 
-A per-entity rule (keep candidates within x% of the entity's best score, with a separate "has any match" gate) was tested and gave no gain (+0.0001), so it was dropped.
+**Validation:** 5-fold GroupKFold by S1 entity, so no S1 appears in both train and validation folds. The metric is the official macro-F0.5 over all S1, including singletons and S1 whose true matches the blocker missed. The sample has 29,169 train S1:
+- 19,819 hash-random S1 (`md5("p3-matcher-v1:" + id) < 0.009`). Every headline number below is on these.
+- every S1 in Bhopal (India) and Tucson (US), 9,350 in total. Keeping a city together scores competing S1 together, so exclusivity and the cross-entity features can be measured ("cities" below).
+- P2's blocking-validation hash sample is excluded, because P2 tuned its blocker on it.
 
-**Validation:** 5-fold GroupKFold by S1 entity, so no S1 appears in both train and validation folds. The metric is the official macro-F0.5 over all sampled S1, including singletons and S1 with zero candidates. The sample is 64,692 S1 (1.94M pairs): 30k random S1 plus every S1 in Jaipur, Columbus, Tucson and Memphis. The dense city part keeps competing S1 together, so exclusivity can be measured.
+## 5. Results (P2's final blocker, 76bc657)
 
-## 5. Results (stand-in token blocking, K=30)
+### K comparison
 
-| | macro-F0.5 |
-|---|---|
-| Final model + exclusivity, threshold 0.64 | **0.8877** |
-| Without exclusivity, threshold 0.64 | 0.8872 |
-| Blocking ceiling (perfect matcher on these candidates) | 0.9276 |
+The sample S1 are the same for every K. Each K is a separate P2 blocker run: the name and non-Latin quota slots scale with K, so K=30 is not the first 30 of the K=100 list. The matcher is retrained and its threshold re-tuned for each K. Singletons = share of singletons correctly left empty.
 
-- Pair AUC is 0.9992, and 91.2% of singletons are correctly left empty.
-- TF-IDF fitted once instead of per batch: 0.8877 → 0.8868 (−0.0009, within run-to-run noise). CV cannot show the gain, because the whole CV sample is one batch; the fix removes a train/test skew in `predict.py`'s 20k-S1 chunks. Measured on the 30k sample, the old per-batch fit moved a pair's name TF-IDF cosine by a mean of 0.023 (p99 0.127, max 0.21) in a 500-S1 batch, and by 0.005 (p99 0.029) in a 20k-S1 batch. Small batches happen at test time: each country's last chunk, and France.
-- Exclusivity measured on the dense-city sample alone: 0.8808 → 0.8825.
-- Cross-entity features: dense-city sample (35,170 S1, the criterion for keeping the feature) 0.8804 → 0.8829 without exclusivity and 0.8823 → **0.8835** with it. Full sample with exclusivity: 0.8868 → 0.8877. Most of the gain overlaps with exclusivity, which already removes the weaker claim on a shared record.
+| K | Pair recall | Ceiling | **macro-F0.5** | Threshold | India | US | Singletons | Test pairs | Test inference* |
+|---|---|---|---|---|---|---|---|---|---|
+| 5 | 67.32% | 0.9059 | 0.8719 | 0.59 | 0.8574 | 0.8815 | 0.892 | 8.7M | ~0.5 h |
+| 10 | 91.20% | 0.9718 | 0.9328 | 0.69 | 0.9136 | 0.9457 | 0.907 | 17.3M | ~1 h |
+| 15 | 94.09% | 0.9790 | 0.9393 | 0.70 | 0.9206 | 0.9519 | 0.908 | 26.0M | ~1.4 h |
+| **20** | **94.87%** | **0.9815** | **0.9407** | **0.65** | **0.9224** | **0.9529** | **0.895** | **34.7M** | **~1.9 h** |
+| 30 | 95.70% | 0.9847 | 0.9385 | 0.64 | 0.9201 | 0.9508 | 0.875 | 52.0M | ~2.9 h |
+| 50 | 96.44% | 0.9874 | 0.9370 | 0.70 | 0.9195 | 0.9487 | 0.876 | 86.6M | ~4.8 h |
+| 100 | 97.01% | 0.9897 | 0.9328 | 0.69 | 0.9140 | 0.9453 | 0.859 | 173.3M | ~9.6 h |
 
-**Where the remaining score goes** (30k random sample, before exclusivity):
+\*Matcher only, single process, at the ~200 s per 1M pairs measured on a 3,000-S1 test smoke run (P2's blocker time is extra).
 
-| Cause | Points lost |
-|---|---|
-| True match never reaches candidates (blocking) | 0.063 |
-| Model misses true pairs | 0.027 |
-| Model accepts wrong pairs | 0.014 |
-| Singletons wrongly given a match | 0.005 |
+Paired differences on the same 19,819 S1 (bootstrap, 2,000 resamples):
 
-**Common false positives:**
-- about 39% are records that belong to a different S1: a different business at the same address, or the same brand at another branch
-- names whose address is missing (`nan`), where the model can only judge the name
-- native-script names where only the address can decide
+| | Δ macro-F0.5 | 95% CI |
+|---|---|---|
+| K=20 − K=15 | +0.0014 | [+0.0004, +0.0023] |
+| K=20 − K=30 | +0.0022 | [+0.0012, +0.0032] |
+| K=20 − K=50 | +0.0037 | [+0.0024, +0.0050] |
+| K=20 − K=100 | +0.0079 | [+0.0066, +0.0093] |
 
-**Common false negatives:** mostly outside the model's reach: native-script names with a changed address, or a missing address together with a typo in the name.
+**Recommended K: 20, threshold 0.65.** This supersedes the provisional K=30 / 0.64 from the stand-in blocker.
+- **Above K=20, extra candidates cost more than they add.** K=100 recovers 2.1 points of pair recall, but it has 5.8× the negatives, and false positives on the sample rise from 1,895 to 2,328 (+23%).
+- **Singletons get worse with larger K:** 89.5% are correctly left empty at K=20, 85.9% at K=100. Each wrong singleton scores 0.
+- **Below K=15, lost recall dominates.** At K=5 the quota slots use 3 of the 5 places.
+- K=20 is also a 5× smaller candidate file than K=100, and the organisers rank smaller candidate sets higher.
 
-## Cost of a smaller K (for P2)
+### P2 features (`rank`, `score`, `name_score`)
 
-The organizers rank a smaller candidate set per S1 higher, so we measured what cutting K costs the matcher. Each S1 keeps its top-K candidates by `block_score` from the stand-in blocking, and the matcher is retrained and cross-validated for each K. Sample: 30k random S1 (`train_pairs`, the same pairs as `train_pairs_oof.parquet`), 5-fold GroupKFold, exclusivity applied.
+| Features | K=20 | K=100 |
+|---|---|---|
+| no P2 features | 0.9298 | 0.9226 |
+| + `score` (with its gap/rank/cross-entity) | 0.9342 | 0.9276 |
+| **+ `rank`, `name_score` (with its gap/rank): final** | **0.9407** | **0.9328** |
 
-| K | Mean candidates per S1 | Blocking ceiling | Model macro-F0.5 |
+All three help, most in India: 0.9048 → 0.9224 at K=20.
+
+### Final model (K=20, threshold 0.65, 19,819 random S1)
+
+| | macro-F0.5 | Ceiling |
+|---|---|---|
+| All | **0.9407** | 0.9815 |
+| India (7,945 S1) | 0.9224 | 0.9703 |
+| US (11,874 S1) | 0.9529 | 0.9891 |
+| Singletons (1,060): correctly empty | 89.5% | |
+| Matched S1 (18,759) | 0.9433 | |
+
+- Pair AUC is 0.9986.
+- Cities sample: 0.9504 with exclusivity and 0.9501 without. With P2's candidates, exclusivity barely changes the score. At test time every S1 is present, so it can act more often than in a random sample.
+
+**Hard negatives** (K=20; FP = accepted negative after exclusivity):
+
+| Negative pairs | Pairs | Accepted | Share of all FPs |
 |---|---|---|---|
-| 3 | 3.00 | 0.8063 | 0.7806 |
-| 5 | 5.00 | 0.8633 | 0.8307 |
-| 10 | 10.00 | 0.8994 | 0.8607 |
-| 15 | 14.99 | 0.9161 | 0.8745 |
-| 20 | 19.99 | 0.9267 | 0.8836 |
-| 30 | 29.97 | 0.9370 | **0.8921** |
+| all | 487,129 | 0.39% | 100% |
+| blocker rank 1–3 | 21,631 | 4.09% | 47% |
+| lookalike name (token-sort ≥ 0.9) | 32,955 | 1.85% | 32% |
+| record that is another S1's true match | 345,614 | 0.18% | 33% |
 
-**Recommended K: 30.** No smaller K comes within 0.002 of the best: K=20 already costs 0.0085, and K=10 costs 0.031. The model tracks the ceiling at a nearly constant gap (0.03–0.045), so almost all of the loss comes from true matches that the cut throws away.
-
-Notes:
-- The curve is still rising at K=30, because the stand-in `block_score` is a plain IDF token overlap that ranks many true matches at positions 21–30. Ground truth has a mean of 3.5 matches per S1 (max 11), so a sharper ranking should reach the same ceiling with a much smaller K. P2 should improve the candidate ranking first, then cut K.
-- Re-run this sweep on P2's `block_score` before choosing K: `python -m src.matching.train --pairs <P2 pairs>.parquet --topk K` (experiment only; it saves nothing).
-- Not tested: an adaptive per-S1 cut (drop candidates far below that S1's best `block_score`) could lower the mean candidate count without a fixed K.
+- The blocker's own top-3 wrong candidates are the hardest group. They cause about half of all false positives, at every K from 10 to 100 (44–52%).
+- A third of FPs are records that truly belong to a different S1. These are the same brand at another branch, or a different business at the same address. At test time exclusivity can drop them when the true owner scores higher.
+- The remaining gap to the ceiling is 0.041. India's per-S1 gap is larger (0.048, vs 0.036 in the US), but the US has more S1, so both countries lose about the same total.
 
 ## Reproduce
 
 ```
-python -m src.blocking.baseline_tokens --n 30000 --out data/interim/train_pairs.parquet
-python -m src.blocking.baseline_tokens --cities jaipur,columbus,tucson,memphis --out data/interim/city_pairs.parquet
-python -m src.matching.train --pairs data/interim/train_pairs.parquet data/interim/city_pairs.parquet --model data/interim/matcher.pkl
-python -m src.matching.predict --model data/interim/matcher.pkl --out output
+python -m src.matching.sample_candidates --top-k 20       # P2's blocker on the 29,169-S1 training sample (~4 min, 2 workers)
+python -m src.matching.train --cands output/candidates_p3/k20      # ~7 min; add --variants "" "^(rank|name_score)" for the ablation
+python -m src.blocking.generate_candidates --split test --top-k 20   # P2: output/candidates/test + output/candidate_pairs.tsv
+python -m src.matching.predict --model output/candidates_p3/k20/matcher.pkl
 python resources/utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir data/raw/test
 ```
 
-On 16 GB RAM with 32 threads: blocking plus training takes about 25 min, and test inference about 2.5 h. When P2's blocking replaces `baseline_tokens`, retrain the matcher on P2's candidates. Its features and threshold depend on the candidate distribution.
+Previous results with the stand-in token blocker (K=30, macro-F0.5 0.8877) are in git history (`docs/p3_matching.md` at e5f18fb).
